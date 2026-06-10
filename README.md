@@ -112,5 +112,5 @@ MIT — free to use, modify, and distribute.
 ---
 
 <div align="center">
-Built by <b>Assyrian-AI</b> · Powered by Groq & OpenRouter
+Built by <b>Khoshaba.odeesho</b> · Powered by Groq & OpenRouter
 </div>
