@@ -14,7 +14,7 @@ GROQ_MODELS = [
 
 OPENROUTER_MODELS = [
     "meta-llama/llama-3.3-70b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
     "google/gemma-2-9b-it:free",
     "qwen/qwen-2.5-72b-instruct:free",
 ]
