@@ -32,6 +32,13 @@ from cleaning import (
     get_cleaning_summary,
 )
 
+# ── v2: RAG Deep Chat + Visual Explorer ──
+try:
+    from rag_chat import df_to_chunks, build_faiss_index, rag_answer
+    RAG_AVAILABLE = True
+except ImportError:
+    RAG_AVAILABLE = False
+
 # ─────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────
@@ -101,6 +108,11 @@ st.markdown("""
     }
     .stButton > button:hover { background: #1D4ED8; }
     #MainMenu, header, footer { visibility: hidden; }
+    .rag-source {
+        background: #0F172A; border: 1px solid #334155;
+        border-radius: 6px; padding: 10px 14px; margin: 4px 0;
+        font-size: 0.78rem; color: #64748B; font-family: monospace;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -115,6 +127,9 @@ for key, default in {
     "custom_figs": {}, "freq": "M",
     "provider": "groq", "model": None,
     "original_df": None, "cleaning_log": [],
+    # v2 RAG state
+    "rag_index": None, "rag_chunks": None, "rag_model": None,
+    "rag_history": [], "rag_indexed": False,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -288,6 +303,12 @@ with st.sidebar:
             st.session_state.display_history = []
             st.session_state.auto_insights = ""
             st.session_state.custom_figs = {}
+            # Reset RAG state on new upload
+            st.session_state.rag_index = None
+            st.session_state.rag_chunks = None
+            st.session_state.rag_model = None
+            st.session_state.rag_indexed = False
+            st.session_state.rag_history = []
 
         st.success(f"✓ {len(df):,} rows × {len(df.columns)} cols")
 
@@ -336,7 +357,7 @@ with st.sidebar:
     Built by <b style='color:#94A3B8;'>Assyrian-AI</b><br>
     github.com/Assyrian-AI<br>
     Powered by Groq & OpenRouter<br>
-    v2.0
+    v2.0 — RAG Deep Chat + Visual Explorer
     </div>
     """, unsafe_allow_html=True)
 
@@ -356,18 +377,18 @@ if st.session_state.df is None:
 
     st.markdown("""
     <div style='text-align:center; padding: 10px 20px 60px 20px;'>
-        <h1 style='color:#F1F5F9; font-size:2.2rem; margin-bottom:6px;'>Assyrian-AI Data Analyst</h1>
+        <h1 style='color:#F1F5F9; font-size:2.2rem; margin-bottom:6px;'>Assyrian-AI Data Analyst v2</h1>
         <p style='color:#94A3B8; font-size:1.05rem; max-width:560px; margin:0 auto 10px;'>
             Upload <em>any</em> CSV, Excel, or JSON — sales, HR, finance, healthcare,
             logistics, surveys, sports, or anything else.<br>
-            Get instant charts, statistics, and AI-powered insights.
+            Get instant charts, statistics, AI-powered insights, RAG deep chat over your actual rows, and a drag-and-drop visual explorer.
         </p>
         <div style='color:#64748B; font-size:0.85rem; line-height:2.2; margin-top:18px;'>
             ① Get a free API key from <b style='color:#94A3B8'>Groq</b> or <b style='color:#94A3B8'>OpenRouter</b>
             &nbsp;→&nbsp;
             ② Upload your file
             &nbsp;→&nbsp;
-            ③ Explore & ask questions
+            ③ Explore, clean, chat & ask deep questions
         </div>
         <div style='margin-top:28px; display:flex; justify-content:center; gap:16px; flex-wrap:wrap;'>
             <a href='https://console.groq.com' target='_blank'
@@ -440,8 +461,10 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ─────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🤖 AI Chat", "📈 Trends", "📊 Distribution", "🏆 Top N", "🔬 Statistics & Forecast", "🧹 Clean Data",
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    "🤖 AI Chat", "📈 Trends", "📊 Distribution", "🏆 Top N",
+    "🔬 Statistics & Forecast", "🧹 Clean Data",
+    "💬 Deep Chat (RAG)", "🔍 Visual Explorer",
 ])
 
 # ── TAB 1: AI CHAT ───────────────────────────
@@ -860,3 +883,158 @@ with tab6:
 
     with st.expander("👀 Preview current dataset", expanded=False):
         st.dataframe(st.session_state.df, use_container_width=True)
+
+
+# ── TAB 7: DEEP CHAT (RAG) ───────────────────
+with tab7:
+    st.markdown("### 💬 Deep Chat — Grounded in Your Actual Rows")
+    st.caption(
+        "Unlike AI Chat (which uses a data summary), Deep Chat retrieves the most relevant "
+        "rows from your file using FAISS vector search, then answers based on real data. "
+        "Requires an OpenRouter API key."
+    )
+
+    if not RAG_AVAILABLE:
+        st.error(
+            "RAG dependencies not installed. Run:\n```\npip install faiss-cpu sentence-transformers\n```"
+        )
+    else:
+        col_idx, col_info_rag = st.columns([3, 1])
+
+        with col_idx:
+            if not st.session_state.rag_indexed:
+                st.info(
+                    f"Click **Build Index** to prepare {len(df):,} rows for deep search. "
+                    "Takes ~10–30 seconds depending on file size."
+                )
+
+            if st.button("🔨 Build Index", disabled=st.session_state.rag_indexed):
+                with st.spinner("Chunking rows and building FAISS index (first time only)..."):
+                    try:
+                        from sentence_transformers import SentenceTransformer
+                        model_st = SentenceTransformer("all-MiniLM-L6-v2")
+                        chunks = df_to_chunks(df, chunk_size=10)
+                        index, _ = build_faiss_index(chunks, model_st)
+                        st.session_state.rag_model = model_st
+                        st.session_state.rag_chunks = chunks
+                        st.session_state.rag_index = index
+                        st.session_state.rag_indexed = True
+                        st.success(f"✓ Indexed {len(chunks)} chunks across {len(df):,} rows.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to build index: {e}")
+
+        with col_info_rag:
+            if st.session_state.rag_indexed:
+                st.success(f"✓ Index ready\n{len(st.session_state.rag_chunks)} chunks")
+                if st.button("🔄 Rebuild"):
+                    st.session_state.rag_indexed = False
+                    st.session_state.rag_history = []
+                    st.rerun()
+
+        if st.session_state.rag_indexed:
+            st.markdown("---")
+
+            for msg in st.session_state.rag_history:
+                if msg["role"] == "user":
+                    st.markdown(
+                        f'<div class="chat-user">🧑 {msg["content"]}</div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown(
+                        f'<div class="chat-ai">🤖 {msg["content"]}</div>',
+                        unsafe_allow_html=True
+                    )
+                    if msg.get("sources"):
+                        with st.expander(f"📎 {len(msg['sources'])} retrieved chunks"):
+                            for s in msg["sources"]:
+                                st.markdown(
+                                    f'<div class="rag-source">Rows {s["start_row"]+1}–{s["end_row"]+1} '
+                                    f'· score: {s["score"]:.4f}<br><pre>{s["text"][:400]}...</pre></div>',
+                                    unsafe_allow_html=True
+                                )
+
+            with st.form("rag_form", clear_on_submit=True):
+                rag_input = st.text_area(
+                    "", height=80, label_visibility="collapsed",
+                    placeholder="e.g. Which rows have the highest values? What's unusual about row 12?",
+                )
+                rag_send = st.form_submit_button("Ask →", use_container_width=True)
+
+            if rag_send and rag_input.strip():
+                if not os.environ.get("OPENROUTER_API_KEY"):
+                    st.error("Paste your OpenRouter API key in the sidebar to use Deep Chat.")
+                else:
+                    st.session_state.rag_history.append({"role": "user", "content": rag_input})
+                    with st.spinner("Retrieving relevant rows and generating answer..."):
+                        try:
+                            result = rag_answer(
+                                question=rag_input,
+                                index=st.session_state.rag_index,
+                                chunks=st.session_state.rag_chunks,
+                                model=st.session_state.rag_model,
+                                top_k=5,
+                            )
+                            st.session_state.rag_history.append({
+                                "role": "assistant",
+                                "content": result["answer"],
+                                "sources": result["sources"],
+                            })
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"RAG error: {e}")
+
+            if st.session_state.rag_history and st.button("Clear Deep Chat"):
+                st.session_state.rag_history = []
+                st.rerun()
+
+            st.markdown("#### 💡 Try these")
+            rag_quick = [
+                "Which rows have the highest values?",
+                "Are there any unusual or suspicious rows?",
+                "What patterns do you see in the first 50 rows?",
+                "Which entries are missing data?",
+            ]
+            for q in rag_quick:
+                if st.button(q, key=f"rq_{q[:20]}", use_container_width=True):
+                    if os.environ.get("OPENROUTER_API_KEY"):
+                        st.session_state.rag_history.append({"role": "user", "content": q})
+                        with st.spinner("Retrieving..."):
+                            try:
+                                result = rag_answer(
+                                    question=q,
+                                    index=st.session_state.rag_index,
+                                    chunks=st.session_state.rag_chunks,
+                                    model=st.session_state.rag_model,
+                                    top_k=5,
+                                )
+                                st.session_state.rag_history.append({
+                                    "role": "assistant",
+                                    "content": result["answer"],
+                                    "sources": result["sources"],
+                                })
+                                st.rerun()
+                            except Exception as e:
+                                st.error(str(e))
+                    else:
+                        st.warning("Add your OpenRouter key first.")
+
+
+# ── TAB 8: VISUAL EXPLORER (PyGWalker) ───────
+with tab8:
+    st.markdown("### 🔍 Visual Explorer")
+    st.caption(
+        "Drag and drop columns to build your own charts — no code needed. "
+        "Powered by PyGWalker (Tableau-style exploration)."
+    )
+    try:
+        import pygwalker as pyg
+        pyg_html = pyg.to_html(df)
+        st.components.v1.html(pyg_html, height=700, scrolling=True)
+    except ImportError:
+        st.error(
+            "PyGWalker not installed. Run:\n```\npip install pygwalker\n```\nthen restart the app."
+        )
+    except Exception as e:
+        st.error(f"Visual Explorer error: {e}")
