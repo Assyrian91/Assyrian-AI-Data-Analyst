@@ -130,6 +130,8 @@ for key, default in {
     # v2 RAG state
     "rag_index": None, "rag_chunks": None, "rag_model": None,
     "rag_history": [], "rag_indexed": False,
+    # FIX: track uploaded file name to prevent re-loading on every rerun
+    "uploaded_file_name": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -145,6 +147,17 @@ def _download_btn(fig, filename, key):
     st.download_button("⬇️ Download PNG", data=buf,
                        file_name=f"{filename}.png", mime="image/png",
                        key=f"dl_{key}")
+
+
+def _normalize_missing(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    FIX: Convert empty strings and whitespace-only strings to NaN
+    so cleaning functions correctly detect and handle missing values.
+    """
+    df = df.copy()
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].replace(r'^\s*$', np.nan, regex=True)
+    return df
 
 
 def chart_builder(df, tab_key, default_x=None, default_y=None):
@@ -215,7 +228,6 @@ def chart_builder(df, tab_key, default_x=None, default_y=None):
 # SIDEBAR
 # ─────────────────────────────────────────────
 with st.sidebar:
-    # ── Logo + branding ──
     logo_path = Path("logo.jpeg")
     if not logo_path.exists():
         logo_path = Path("logo.jpg")
@@ -229,17 +241,16 @@ with st.sidebar:
         with col_brand:
             st.markdown("""
             <div class="brand-name">Assyrian-AI</div>
-            <div class="brand-sub">AI Data Analyst</div>
+            <div class="brand-sub">AI Data Analyst v2</div>
             """, unsafe_allow_html=True)
     else:
         st.markdown("""
         <div style="font-size:1.2rem; font-weight:700; color:#F1F5F9;">🧠 Assyrian-AI</div>
-        <div style="font-size:0.75rem; color:#64748B; margin-bottom:4px;">AI Data Analyst</div>
+        <div style="font-size:0.75rem; color:#64748B; margin-bottom:4px;">AI Data Analyst v2</div>
         """, unsafe_allow_html=True)
 
     st.markdown("---")
 
-    # ── AI Provider ──
     st.markdown("### 🤖 AI Provider")
     provider = st.radio(
         "Provider", ["Groq (Free)", "OpenRouter (Free)"],
@@ -279,71 +290,79 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # ── File upload ──
     st.markdown("### 📁 Upload Data")
     uploaded = st.file_uploader("CSV, Excel or JSON",
                                 type=["csv", "xlsx", "xls", "json"])
 
-    if uploaded:
-        with st.spinner("Loading..."):
-            df = load_data(uploaded)
-            col_info = detect_columns(df)
-            primary = get_primary_cols(col_info)
-            data_sum = build_data_summary(df, col_info)
-            anal_sum = build_analysis_summary(df, col_info)
+    # ── FIX: Only reload data when a NEW file is uploaded ──
+    # Compare file name + size to detect genuine new uploads vs reruns
+    if uploaded is not None:
+        file_id = f"{uploaded.name}_{uploaded.size}"
+        if file_id != st.session_state.uploaded_file_name:
+            # Genuinely new file — process it
+            with st.spinner("Loading..."):
+                df_raw = load_data(uploaded)
+                # FIX: normalize empty strings to NaN immediately on load
+                df_clean = _normalize_missing(df_raw)
+                col_info = detect_columns(df_clean)
+                primary = get_primary_cols(col_info)
+                data_sum = build_data_summary(df_clean, col_info)
+                anal_sum = build_analysis_summary(df_clean, col_info)
 
-            st.session_state.df = df
-            st.session_state.original_df = df.copy()
-            st.session_state.cleaning_log = []
-            st.session_state.col_info = col_info
-            st.session_state.primary = primary
-            st.session_state.data_summary = data_sum
-            st.session_state.analysis_summary = anal_sum
-            st.session_state.chat_history = []
-            st.session_state.display_history = []
-            st.session_state.auto_insights = ""
-            st.session_state.custom_figs = {}
-            # Reset RAG state on new upload
-            st.session_state.rag_index = None
-            st.session_state.rag_chunks = None
-            st.session_state.rag_model = None
-            st.session_state.rag_indexed = False
-            st.session_state.rag_history = []
-
-        st.success(f"✓ {len(df):,} rows × {len(df.columns)} cols")
-
-        n_changes = len(st.session_state.cleaning_log)
-        _buf = io.StringIO()
-        st.session_state.df.to_csv(_buf, index=False)
-        st.download_button(
-            f"⬇️ Download data{' (cleaned)' if n_changes else ''} (CSV)",
-            data=_buf.getvalue(),
-            file_name="dataset_cleaned.csv" if n_changes else "dataset.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-        with st.expander("🔍 Detected column roles"):
-            for role in ("date", "value", "category", "id"):
-                cols = col_info.get(role, [])
-                if cols:
-                    st.markdown(f"**{role.title()}:** {', '.join(cols[:4])}")
-
-        with st.expander("⚙️ Override column roles"):
-            all_c = ["(auto)"] + df.columns.tolist()
-            overrides = {}
-            for role, label in [("date","Date/Time"), ("value","Primary Value"),
-                                ("category","Category/Group"), ("id","ID column")]:
-                current = primary.get(role)
-                idx = all_c.index(current) if current in all_c else 0
-                chosen = st.selectbox(label, all_c, index=idx, key=f"ov_{role}")
-                if chosen != "(auto)":
-                    overrides[role] = chosen
-            if st.button("Apply overrides") and overrides:
-                primary.update(overrides)
+                st.session_state.df = df_clean
+                st.session_state.original_df = df_clean.copy()
+                st.session_state.uploaded_file_name = file_id
+                st.session_state.cleaning_log = []
+                st.session_state.col_info = col_info
                 st.session_state.primary = primary
-                st.session_state.analysis_summary = build_analysis_summary(df, col_info)
-                st.success("Applied ✓")
+                st.session_state.data_summary = data_sum
+                st.session_state.analysis_summary = anal_sum
+                st.session_state.chat_history = []
+                st.session_state.display_history = []
+                st.session_state.auto_insights = ""
+                st.session_state.custom_figs = {}
+                st.session_state.rag_index = None
+                st.session_state.rag_chunks = None
+                st.session_state.rag_model = None
+                st.session_state.rag_indexed = False
+                st.session_state.rag_history = []
+
+            st.success(f"✓ {len(df_clean):,} rows × {len(df_clean.columns)} cols")
+
+        # Always show download + expanders if a file is loaded
+        if st.session_state.df is not None:
+            n_changes = len(st.session_state.cleaning_log)
+            _buf = io.StringIO()
+            st.session_state.df.to_csv(_buf, index=False)
+            st.download_button(
+                f"⬇️ Download data{' (cleaned)' if n_changes else ''} (CSV)",
+                data=_buf.getvalue(),
+                file_name="dataset_cleaned.csv" if n_changes else "dataset.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+            with st.expander("🔍 Detected column roles"):
+                for role in ("date", "value", "category", "id"):
+                    cols = st.session_state.col_info.get(role, [])
+                    if cols:
+                        st.markdown(f"**{role.title()}:** {', '.join(cols[:4])}")
+
+            with st.expander("⚙️ Override column roles"):
+                all_c = ["(auto)"] + st.session_state.df.columns.tolist()
+                overrides = {}
+                for role, label in [("date","Date/Time"), ("value","Primary Value"),
+                                    ("category","Category/Group"), ("id","ID column")]:
+                    current = st.session_state.primary.get(role)
+                    idx = all_c.index(current) if current in all_c else 0
+                    chosen = st.selectbox(label, all_c, index=idx, key=f"ov_{role}")
+                    if chosen != "(auto)":
+                        overrides[role] = chosen
+                if st.button("Apply overrides") and overrides:
+                    st.session_state.primary.update(overrides)
+                    st.session_state.analysis_summary = build_analysis_summary(
+                        st.session_state.df, st.session_state.col_info)
+                    st.success("Applied ✓")
 
     st.markdown("---")
     st.markdown("### ⏱ Time grouping")
@@ -355,7 +374,7 @@ with st.sidebar:
     st.markdown("""
     <div style='font-size:0.72rem; color:#475569; line-height:1.8;'>
     Built by <b style='color:#94A3B8;'>Assyrian-AI</b><br>
-    github.com/Assyrian-AI<br>
+    github.com/Assyrian91<br>
     Powered by Groq & OpenRouter<br>
     v2.0 — RAG Deep Chat + Visual Explorer
     </div>
@@ -418,7 +437,6 @@ freq = st.session_state.freq
 trends = compute_time_trend(df, col_info, freq=freq)
 val_label = (primary.get("value") or "Value")
 
-# ── Header bar with logo ──
 logo_path = Path("logo.jpeg")
 if not logo_path.exists(): logo_path = Path("logo.jpg")
 if not logo_path.exists(): logo_path = Path("logo.png")
@@ -434,7 +452,6 @@ with hc2:
         unsafe_allow_html=True,
     )
 
-# ── KPIs ──
 k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
     st.metric("Total Rows", f"{len(df):,}")
@@ -718,7 +735,6 @@ with tab6:
 
     working_df = st.session_state.df
 
-    # ── Status row ──
     summary = get_cleaning_summary(st.session_state.original_df, working_df)
     s1, s2, s3, s4 = st.columns(4)
     with s1: st.metric("Rows now", f"{summary['cleaned_rows']:,}", f"{-summary['rows_removed']:,}" if summary['rows_removed'] else None)
@@ -749,7 +765,6 @@ with tab6:
         "🩹 Missing Values", "🧮 Outliers & Duplicates", "🔤 Text Cleanup", "🔁 Fix Column Types"
     ])
 
-    # ── MISSING VALUES ──
     with clean_tab1:
         missing_report = get_missing_report(working_df)
         if missing_report.empty:
@@ -785,7 +800,6 @@ with tab6:
                 st.session_state.analysis_summary = build_analysis_summary(new_df, new_col_info)
                 st.rerun()
 
-    # ── OUTLIERS & DUPLICATES ──
     with clean_tab2:
         st.markdown("#### Remove outliers")
         num_cols_now = working_df.select_dtypes(include="number").columns.tolist()
@@ -814,7 +828,6 @@ with tab6:
             st.session_state.cleaning_log.append(f"Removed {n_removed} duplicate rows" + (f" (based on {', '.join(dup_subset)})" if dup_subset else ""))
             st.rerun()
 
-    # ── TEXT CLEANUP ──
     with clean_tab3:
         st.markdown("#### Standardize text columns")
         text_cols = working_df.select_dtypes(include="object").columns.tolist()
@@ -832,7 +845,6 @@ with tab6:
                 st.session_state.cleaning_log.append(f"Standardized text in {', '.join(f'`{c}`' for c in sel_text_cols)} ({', '.join(ops)})")
                 st.rerun()
 
-    # ── FIX COLUMN TYPES ──
     with clean_tab4:
         st.markdown("#### Convert a column's data type")
         ftc1, ftc2 = st.columns(2)
@@ -859,7 +871,6 @@ with tab6:
                 st.session_state.cleaning_log.append(msg)
                 st.rerun()
 
-    # ── EXPORT ──
     st.markdown("---")
     st.markdown("### ⬇️ Export Cleaned Dataset")
     ec1, ec2, ec3 = st.columns(3)
