@@ -16,17 +16,31 @@ def _looks_like_csv(raw_bytes: bytes) -> bool:
     return "," in sample and "\n" in sample
 
 
+def _read_csv_safe(bio: io.BytesIO) -> pd.DataFrame:
+    """Try multiple encodings so Excel-exported CSVs always load cleanly."""
+    for encoding in ["utf-8", "utf-8-sig", "latin-1", "cp1252", "iso-8859-1"]:
+        try:
+            bio.seek(0)
+            return pd.read_csv(bio, encoding=encoding)
+        except (UnicodeDecodeError, Exception):
+            continue
+    raise ValueError(
+        "Could not read CSV file. Try saving as 'CSV UTF-8 (Comma delimited)' "
+        "from Excel: File → Save As → CSV UTF-8."
+    )
+
+
 def load_data(file_or_path) -> pd.DataFrame:
     if isinstance(file_or_path, (str, Path)):
         p = Path(file_or_path)
         s = p.suffix.lower()
         if s == ".csv":
-            return pd.read_csv(p)
+            return _read_csv_safe(io.BytesIO(p.read_bytes()))
         if s in {".xls", ".xlsx"}:
             return pd.read_excel(p)
         if s == ".json":
             return pd.read_json(p)
-        return pd.read_csv(p)
+        return _read_csv_safe(io.BytesIO(p.read_bytes()))
 
     name   = getattr(file_or_path, "name", None)
     suffix = Path(name).suffix.lower() if name else None
@@ -36,14 +50,14 @@ def load_data(file_or_path) -> pd.DataFrame:
     bio = io.BytesIO(raw)
 
     if suffix == ".csv" or (suffix is None and _looks_like_csv(raw)):
-        bio.seek(0); return pd.read_csv(bio)
+        return _read_csv_safe(bio)
     if suffix in {".xls", ".xlsx"}:
         bio.seek(0); return pd.read_excel(bio)
     if suffix == ".json":
         bio.seek(0); return pd.read_json(bio)
     bio.seek(0)
     try:
-        return pd.read_csv(bio)
+        return _read_csv_safe(bio)
     except Exception:
         bio.seek(0); return pd.read_json(bio)
 
@@ -116,7 +130,6 @@ def detect_columns(df: pd.DataFrame) -> dict:
 
         # Numeric
         if pd.api.types.is_numeric_dtype(series):
-            # check hints for value vs id
             matched = False
             for hint in _ROLE_HINTS["value"]:
                 if hint in col_lower:
@@ -146,7 +159,6 @@ def detect_columns(df: pd.DataFrame) -> dict:
                 continue
             break
         else:
-            # fallback: low cardinality → category, high → text/id
             if nunique <= max(50, total * 0.05):
                 result["category"].append(col)
             elif nunique == total:
@@ -154,14 +166,12 @@ def detect_columns(df: pd.DataFrame) -> dict:
             else:
                 result["text"].append(col)
 
-    # Build categorical convenience list
     result["categorical"] = [
         c for c in df.columns
         if c not in result["numeric"] and c not in result["date"]
         and df[c].nunique(dropna=True) <= max(50, len(df) * 0.05)
     ]
 
-    # Deduplicate each list while preserving order
     for k in result:
         seen = set()
         deduped = []
@@ -197,13 +207,11 @@ def build_data_summary(df: pd.DataFrame, col_info: dict) -> str:
     lines.append(f"Columns: {', '.join(df.columns.tolist())}")
     lines.append(f"Detected roles: {primary}")
 
-    # Numeric stats
     num_cols = col_info["numeric"]
     if num_cols:
         lines.append("\nNumeric summary:")
         lines.append(df[num_cols].describe().round(2).to_string())
 
-    # Date range
     if primary["date"]:
         try:
             dates = pd.to_datetime(df[primary["date"]], errors="coerce").dropna()
@@ -211,12 +219,10 @@ def build_data_summary(df: pd.DataFrame, col_info: dict) -> str:
         except Exception:
             pass
 
-    # Categorical samples
     for col in col_info["categorical"][:3]:
         top = df[col].value_counts().head(5)
         lines.append(f"\nTop values in '{col}': {top.to_dict()}")
 
-    # Nulls
     nulls = df.isnull().sum()
     nulls = nulls[nulls > 0]
     if not nulls.empty:
